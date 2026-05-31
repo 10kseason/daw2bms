@@ -1,0 +1,32 @@
+{
+  "input": "examples\\demo.mid",
+  "output": "examples\\demo_split.bms",
+  "source_format": "midi",
+  "notes_in_midi": 14,
+  "notes_used": 14,
+  "notes_filtered": 0,
+  "collisions": 0,
+  "resolution": 192,
+  "mapping": "explicit lane-notes",
+  "lane_channels": [
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "18",
+    "19"
+  ],
+  "time_signature": "4/4",
+  "tempo_events": 1,
+  "time_signature_events": 1,
+  "keysound_source": "examples\\demo_source.wav",
+  "keysounds_written": 14,
+  "track_names": {
+    "0": "daw2bms demo"
+  },
+  "warnings": [
+    "keysound slicing cuts the source WAV by note time; full-mix audio will not isolate instruments",
+    "no BGM audio was attached; add --bgm song.wav for playable preview"
+  ]
+}

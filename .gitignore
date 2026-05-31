@@ -1,0 +1,30 @@
+# ── do NOT publish: third-party / user song projects (copyright) ──
+pj5/
+뱅어즈님 대신 변환/
+auto_track_stems_test/
+dist/
+
+# generated keysound output dirs
+keysounds_*/
+*_test_synthsrc/
+*_test/
+
+# generated audio / charts / project files (incl. copyrighted songs at root)
+*.wav
+*.mid
+*.midi
+*.flp
+*.bms
+*.summary.json
+*.zip
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# keep tool assets and the self-generated demo
+!silence.wav
+!examples/**
