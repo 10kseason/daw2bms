@@ -1,0 +1,31 @@
+{
+  "input": "examples\\demo.mid",
+  "output": "examples\\demo.bms",
+  "source_format": "midi",
+  "notes_in_midi": 14,
+  "notes_used": 14,
+  "notes_filtered": 0,
+  "collisions": 0,
+  "resolution": 192,
+  "mapping": "explicit lane-notes",
+  "lane_channels": [
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "18",
+    "19"
+  ],
+  "time_signature": "4/4",
+  "tempo_events": 1,
+  "time_signature_events": 1,
+  "keysound_source": null,
+  "keysounds_written": 0,
+  "track_names": {
+    "0": "daw2bms demo"
+  },
+  "warnings": [
+    "no BGM audio was attached; add --bgm song.wav for playable preview"
+  ]
+}
