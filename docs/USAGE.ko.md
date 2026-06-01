@@ -17,6 +17,33 @@
 
 주의: 이 도구는 FL Studio의 플러그인 소리를 정확히 렌더링하는 프로그램이 아닙니다. `--synth-keysounds`는 테스트용 내장 신스로 키음을 만드는 기능입니다. 실제 투고 품질을 원하면 FL Studio에서 악기별 stem 또는 keysound용 WAV를 따로 렌더한 뒤 사용하는 쪽이 더 안전합니다.
 
+## 신규 옵션 — 원곡 충실 변환 (권장 워크플로우)
+
+원곡처럼 들리게 하려면 "타격감 악기는 키음, 리버브/서스테인 악기는 연속 BGM 스템" 하이브리드가 가장 효과적입니다.
+
+```bat
+python daw2bms.py "song.mid" -o "song.bms" ^
+  --all-notes-to-bgm --max-seconds 129 --background-layers 32 ^
+  --track-audio-map "2=Kick.wav,5=Hat.wav,6=Snare.wav,10=Bass.wav,11=Brass.wav,12=Lead.wav,13=Orch.wav,19=Piano.wav,20=Organ.wav,21=Bell.wav" ^
+  --bgm-stem-tracks 11,12,13,19,20,21 ^
+  --extra-bgm-stems "Insert 5.wav" ^
+  --bgm-stem-max-seconds 28 ^
+  --keysound-reuse track-pitch-duration ^
+  --clip-overlap-keysounds --clip-overlap-exclude-tracks 19 ^
+  --keysound-dir "keysounds" --summary-json "out.summary.json"
+```
+
+새로 추가된 옵션:
+
+- `--bgm-stem-tracks 11,12,13,...`: 해당 트랙을 노트별로 자르지 않고 **스템을 통째로 연속 BGM**으로 배치합니다. 리버브/서스테인 악기(패드·스트링·피아노·오르간·벨)는 노트별로 자르면 꼬리가 끊기므로 이쪽이 깔끔합니다. 스템은 **마디 경계 기준 청크**로 분할돼 끊김 없이 이어집니다.
+- `--bgm-stem-max-seconds 28`: 각 스템 청크의 최대 길이(초). BMS IR(인터넷 랭킹)은 키음 길이 **30초 제한**이 있어서 그 아래로 쪼갭니다. 마디 경계로 자르므로 재생은 gapless.
+- `--bgm-stem-seam-fade-ms 3`: 청크 경계의 declick 페이드(ms). beatoraja처럼 샘플 단위로 스케줄하는 플레이어면 `0`도 가능.
+- `--extra-bgm-stems "Insert 5.wav,FX.wav"`: **MIDI 트랙과 무관한** raw 스템 WAV를 연속 BGM으로 배치합니다. 오디오 클립 악기, 혹은 매핑에서 빠진 믹서 인서트처럼 **노트가 없는 소리**를 넣을 때 씁니다.
+- `--keysound-fade-in-ms 2 / --keysound-fade-out-ms 8`: 잘린 키음 끝의 "툭" 클릭을 없애는 declick 페이드.
+- `--clip-overlap-exclude-tracks 19`: `--clip-overlap-keysounds`에서 특정 트랙을 제외합니다. BMS는 키음을 다시 쳐도 이전 음이 꺼지지 않으므로(자연 중첩), **피아노 등 여음이 긴 악기는 clip하면 끊겨 들립니다.** 그런 트랙을 여기 넣어 풀로 울리게 둡니다.
+
+⚠️ **원곡과 다르게 들리거나 "뭔가 빠진" 느낌이면**, 먼저 **모든 비-무음 stem/믹서 인서트가 키음이나 스템으로 들어갔는지 대조**하세요. 매핑에서 빠진 인서트가 가장 흔한 원인이며, MIDI 노트가 없는 인서트는 `--extra-bgm-stems`로 넣습니다.
+
 ## 준비
 
 Python 3이 필요합니다.

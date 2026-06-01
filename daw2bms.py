@@ -1860,6 +1860,7 @@ def allocate_bgm_stem_wavs(
     used_codes: set,
     numerator: int,
     denominator: int,
+    extra_sources: Optional[Sequence[Path]] = None,
 ) -> Tuple[Dict[str, str], List[Tuple[str, int, int]]]:
     """Place instrument stems as continuous BGM, split into measure-aligned chunks.
 
@@ -1868,9 +1869,14 @@ def allocate_bgm_stem_wavs(
     boundaries into chunks of at most --bgm-stem-max-seconds (BMS IR keysound length
     limit), then place each chunk at its own measure. Measure boundaries land on slot 0
     with no rounding, so the chunks play back gaplessly and the audio stays continuous.
-    Returns wav_defs plus placements as (code, measure, slot=0).
+
+    `extra_sources` are raw stem WAVs not tied to any MIDI track (e.g. an audio-clip
+    instrument that exported no notes); they are chunked and placed the same way so
+    nothing in the original mix goes missing. Returns wav_defs plus placements
+    as (code, measure, slot=0).
     """
-    if not stem_tracks:
+    extra_sources = list(extra_sources or [])
+    if not stem_tracks and not extra_sources:
         return {}, []
     track_audio_map = discover_track_audio_map(args.auto_track_audio_dir, midi.track_names)
     track_audio_map.update(parse_track_audio_map(args.track_audio_map))
@@ -1895,10 +1901,8 @@ def allocate_bgm_stem_wavs(
         used_nums.add(next_num)
         return next_num
 
-    wav_defs: Dict[str, str] = {}
-    placements: List[Tuple[str, int, int]] = []
-    seen_sources: Dict[str, str] = {}
-    chunk_seq = 0
+    # unified work list: (label, source_path, gain_db)
+    sources: List[Tuple[str, Path, float]] = []
     for track in sorted(stem_tracks):
         source = track_audio_map.get(track)
         if source is None:
@@ -1906,6 +1910,15 @@ def allocate_bgm_stem_wavs(
                 f"--bgm-stem-tracks track {track}:{midi.track_names.get(track, '?')} has no stem WAV; "
                 "add it via --track-audio-map or --auto-track-audio-dir"
             )
+        sources.append((f"t{track:02d}", source, track_gain_map.get(track, 0.0)))
+    for i, source in enumerate(extra_sources):
+        sources.append((f"x{i:02d}", Path(source), 0.0))
+
+    wav_defs: Dict[str, str] = {}
+    placements: List[Tuple[str, int, int]] = []
+    seen_sources: Dict[str, str] = {}
+    chunk_seq = 0
+    for label, source, gain_db in sources:
         if not source.exists():
             raise SystemExit(f"bgm stem WAV not found: {source}")
         # multiple tracks can route to the same mixer stem; place each stem WAV once
@@ -1922,7 +1935,6 @@ def allocate_bgm_stem_wavs(
         if end_seconds <= 0:
             continue
         boundaries = measure_boundary_times(midi, numerator, denominator, end_seconds)
-        gain_db = track_gain_map.get(track, 0.0)
         # greedily group consecutive measures so each chunk <= max_chunk seconds
         seg_start = 0
         span_count = len(boundaries) - 1  # number of full measure spans
@@ -1937,7 +1949,7 @@ def allocate_bgm_stem_wavs(
                 break
             code = base36_code(next_free_num())
             chunk_seq += 1
-            filename = f"stem_t{track:02d}_{chunk_seq:03d}.wav"
+            filename = f"stem_{label}_{chunk_seq:03d}.wav"
             output_wav_path = slice_dir / filename
             fade_in = seam_fade_ms if seg_start > 0 else 0.0
             write_wav_slice(source, output_wav_path, start_t + offset_seconds, length, fade_in, seam_fade_ms)
@@ -1971,6 +1983,18 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         filtered_notes = filter_soft_piano_notes(filtered_notes, args)
     candidate_notes, time_cut_notes, time_clipped_notes = trim_notes_to_max_seconds(filtered_notes, midi, args)
     bgm_stem_tracks = parse_int_set(getattr(args, "bgm_stem_tracks", None), zero_based=True) or set()
+    extra_bgm_stems: List[Path] = []
+    if getattr(args, "extra_bgm_stems", None):
+        for raw in str(args.extra_bgm_stems).replace(";", ",").split(","):
+            entry = raw.strip().strip('"')
+            if not entry:
+                continue
+            path = Path(entry)
+            if not path.exists():
+                raise SystemExit(f"--extra-bgm-stems WAV not found: {path}")
+            if path.suffix.lower() != ".wav":
+                raise SystemExit(f"--extra-bgm-stems supports PCM WAV only: {path}")
+            extra_bgm_stems.append(path)
     bgm_stem_note_count = 0
     if bgm_stem_tracks:
         kept_notes = []
@@ -2113,12 +2137,13 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
 
     bgm_stem_wav_defs: Dict[str, str] = {}
     bgm_stem_placements: List[Tuple[str, int, int]] = []
-    if bgm_stem_tracks:
+    if bgm_stem_tracks or extra_bgm_stems:
         bgm_stem_wav_defs, bgm_stem_placements = allocate_bgm_stem_wavs(
-            args, midi, output_path.parent, bgm_stem_tracks, set(wav_defs), numerator, denominator
+            args, midi, output_path.parent, bgm_stem_tracks, set(wav_defs), numerator, denominator,
+            extra_sources=extra_bgm_stems,
         )
         wav_defs.update(bgm_stem_wav_defs)
-        stem_layer_cap = args.background_layers + len(bgm_stem_tracks) + 4
+        stem_layer_cap = args.background_layers + len(bgm_stem_tracks) + len(extra_bgm_stems) + 4
         for code, measure, slot in bgm_stem_placements:
             layer = first_free_bgm_layer(occupied_bgm, measure, slot, stem_layer_cap)
             if layer is None:
@@ -2189,6 +2214,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "all_notes_to_bgm": args.all_notes_to_bgm,
         "bgm_stem_tracks": args.bgm_stem_tracks,
         "bgm_stem_notes_diverted": bgm_stem_note_count,
+        "extra_bgm_stems": [str(p) for p in extra_bgm_stems] or None,
         "bgm_stem_wavs_placed": len(bgm_stem_placements),
         "bgm_stem_max_seconds": args.bgm_stem_max_seconds if bgm_stem_tracks else None,
         "keysound_fade_in_ms": args.keysound_fade_in_ms,
@@ -2520,6 +2546,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--bgm-stem-tracks",
         help="MIDI/FLP track numbers placed as continuous BGM stems instead of per-note slices; "
         "best for reverb/sustain instruments (pads, strings, piano) that chop badly when sliced",
+    )
+    parser.add_argument(
+        "--extra-bgm-stems",
+        help="extra stem WAV paths placed as continuous BGM, NOT tied to any MIDI track "
+        "(for audio-clip instruments / mixer inserts that exported no notes), comma-separated. "
+        'e.g. "Insert 5.wav,FX.wav"',
     )
     parser.add_argument(
         "--bgm-stem-max-seconds",
