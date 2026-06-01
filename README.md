@@ -17,6 +17,7 @@
 - **Declick fades** on every slice, so cut edges don't pop
 - **IR-safe**: stem chunks stay under the ~30s keysound limit for ranking registration
 - **Per-track clip-overlap exclusion** (`--clip-overlap-exclude-tracks`) so piano/sustain rings naturally — BMS never note-offs a retriggered keysound
+- **Master-chain emulation** (`--master-emulate ref.wav`): shapes each keysound toward a reference master with a matching EQ + soft limiter. The EQ is *linear*, so it transfers exactly; the *non-linear* bus glue (cross-instrument compression/limiting) cannot be reproduced from isolated keysounds and is intentionally not faked
 - Keysound reuse, identical-WAV dedupe, silent-drop, peak normalize, anti-stack, 2-minute test cut
 - A `--summary-json` report for every conversion
 
@@ -76,6 +77,7 @@ DAW（MIDI / FL Studio FLP）から書き出したプロジェクトを、ステ
 - トラックのステムからノートごとにキー音をスライス（実際の音色を保持）
 - **連続 BGM ステムモード**（`--bgm-stem-tracks`）：リバーブ/サステイン系はノート単位で刻まず、小節境界のチャンクとして丸ごと配置（テールが切れない）
 - 全スライスに**デクリック・フェード**（切れ目のプチノイズ防止）
+- **マスターチェーン・エミュレーション**（`--master-emulate ref.wav`）：各キー音をリファレンスのマスターに合わせる。マッチングEQは*線形*なので正確に転写されるが、*非線形*のバスグルー（楽器間のコンプ/リミッター相互作用）は分離キー音では再現不可で、無理に偽装しない
 - **IR 対応**：ステムチャンクをキー音の約30秒制限内に分割
 - **トラック別 clip-overlap 除外**（`--clip-overlap-exclude-tracks`）：BMS は再発音してもノートオフしないので、ピアノ等は自然に響かせる
 - キー音の再利用・同一WAVの重複排除・無音除去・ピーク正規化・アンチスタック・2分テストカット
@@ -122,6 +124,7 @@ DAW(MIDI / FL Studio FLP)에서 내보낸 프로젝트를, **스템에서 잘라
 - 트랙 스템에서 노트별 키음 슬라이스 — 실제 음색 유지
 - **연속 BGM 스템 모드**(`--bgm-stem-tracks`): 리버브/서스테인 악기는 노트별로 안 자르고 마디 경계 청크로 통째 배치 → 꼬리 안 잘림
 - 모든 슬라이스에 **declick 페이드** (잘린 끝 "툭" 제거)
+- **마스터 체인 에뮬레이션**(`--master-emulate ref.wav`): 각 키음을 레퍼런스 마스터에 맞춰 매칭 EQ + 소프트 리미터 적용. EQ는 *선형*이라 정확히 전사되지만, *비선형* 버스 글루(악기 간 comp/limiter 상호작용)는 분리 키음으로 재현 불가 — 억지로 흉내내지 않음
 - **IR 대응**: 스템 청크를 키음 30초 제한 아래로 분할
 - **트랙별 clip-overlap 제외**(`--clip-overlap-exclude-tracks`): BMS는 재트리거해도 이전 키음이 안 꺼지므로 피아노/서스테인은 자연스럽게 울림
 - 키음 재사용·동일 WAV 중복제거·무음 제거·피크 정규화·anti-stack·2분 테스트컷
