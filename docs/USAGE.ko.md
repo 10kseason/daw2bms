@@ -44,6 +44,34 @@ python daw2bms.py "song.mid" -o "song.bms" ^
 
 ⚠️ **원곡과 다르게 들리거나 "뭔가 빠진" 느낌이면**, 먼저 **모든 비-무음 stem/믹서 인서트가 키음이나 스템으로 들어갔는지 대조**하세요. 매핑에서 빠진 인서트가 가장 흔한 원인이며, MIDI 노트가 없는 인서트는 `--extra-bgm-stems`로 넣습니다.
 
+## 마스터 체인 에뮬레이션 (--master-emulate)
+
+드라이 stem에서 자른 키음은 마스터 버스 처리(EQ·컴프·리미터) 전 신호라, 마스터 렌더보다 톤이 다르거나 덜 단단하게 들릴 수 있습니다. `--master-emulate`는 레퍼런스 마스터 WAV를 기준으로 각 키음을 그쪽으로 다듬습니다. (이 기능만 `numpy` 필요)
+
+```bat
+python daw2bms.py "song.mid" -o "song.bms" ^
+  --all-notes-to-bgm --track-audio-map "..." ^
+  --keysound-reuse track-pitch-duration ^
+  --master-emulate "master_render.wav" ^
+  --keysound-dir "keysounds" --summary-json "out.summary.json"
+```
+
+옵션:
+
+- `--master-emulate REF.wav`: 톤·음압을 맞출 레퍼런스 마스터 WAV.
+- `--master-emulate-max-eq-db 8`: 매칭 EQ 보정 한계(dB).
+- `--master-emulate-makeup-db 0`: 0이면 드라이 믹스를 레퍼런스 라우드니스에 **자동 매칭**, 값을 주면 그 게인 사용.
+- `--master-emulate-ceiling-db -0.5`: 소프트 리미터 천장(dBFS).
+
+### 무엇이 되고 무엇이 안 되나 (중요)
+
+이펙트가 **선형이냐 비선형이냐**가 분리 키음에서의 재현 가능성을 가릅니다.
+
+- **선형(EQ·리버브)**: `f(A+B) = f(A)+f(B)`. 같은 매칭 EQ를 각 키음에 걸고 합치면 마스터에 건 것과 **수학적으로 동일** → 톤은 정확히 전사됨. (드라이 믹스가 이미 마스터 톤과 비슷하면 보정량이 작아 효과도 작습니다 — 변환 전후를 측정해 확인하세요.)
+- **비선형(컴프레서·리미터)**: `f(A+B) ≠ f(A)+f(B)`. 마스터 글루는 악기들이 **서로의 레벨에 반응**해 생기는데, 분리된 키음은 자기 소리만 보므로 그 상호작용을 **재현할 수 없습니다.** `--master-emulate`의 소프트 리미터는 개별 키음의 음압·밀도를 근사할 뿐, 진짜 버스 글루가 아닙니다.
+
+즉 **마스터에서 톤(EQ)을 많이 만진 곡일수록 효과가 크고**, 마스터가 거의 리미터 글루만 하는 곡이면 이 기능으로 얻을 게 적습니다. 진짜 마스터 사운드가 꼭 필요하면 마스터 렌더 자체를 `--extra-bgm-stems`로 깔아 BGM 베드로 쓰는 편이 정확합니다.
+
 ## 준비
 
 Python 3이 필요합니다.

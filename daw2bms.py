@@ -1962,6 +1962,166 @@ def allocate_bgm_stem_wavs(
     return wav_defs, placements
 
 
+def apply_master_emulation(keysound_files: Sequence[Path], args: argparse.Namespace, dry_mix_sources: Optional[Sequence[Path]] = None) -> Dict[str, object]:
+    """Emulate the project's master chain on isolated per-note keysounds.
+
+    Isolation (per-instrument slices) and the real master glue can't both come from
+    one render, so we *emulate*: a matching EQ derived from a reference master is LINEAR,
+    so applying the same curve to each keysound and summing reproduces the master's tone
+    exactly. A soft (tanh) limiter approximates the master limiter's loudness/density.
+    The non-linear inter-instrument glue (bus compression pumping) cannot be reproduced
+    from isolated slices and is intentionally not attempted.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise SystemExit("--master-emulate requires numpy: python -m pip install numpy")
+
+    reference_path = Path(args.master_emulate)
+    if not reference_path.exists():
+        raise SystemExit(f"--master-emulate reference WAV not found: {reference_path}")
+
+    n_fft = 4096
+
+    def read_float(path: Path, max_seconds: Optional[float] = None):
+        with wave.open(str(path), "rb") as w:
+            sr = w.getframerate(); ch = w.getnchannels(); sw = w.getsampwidth()
+            n = w.getnframes()
+            if max_seconds:
+                n = min(n, int(sr * max_seconds))
+            data = w.readframes(n)
+        if sw != 2:
+            return None, sr, ch
+        a = np.frombuffer(data, dtype="<i2").astype(np.float64) / 32768.0
+        a = a.reshape(-1, ch) if ch > 1 else a.reshape(-1, 1)
+        return a, sr, ch
+
+    def avg_spectrum(mono, sr):
+        win = np.hanning(n_fft)
+        if len(mono) < n_fft:
+            pad = np.zeros(n_fft); pad[: len(mono)] = mono
+            frames = [pad * win]
+        else:
+            hop = n_fft // 2
+            frames = [mono[i : i + n_fft] * win for i in range(0, len(mono) - n_fft, hop)]
+        if not frames:
+            return None
+        acc = np.zeros(n_fft // 2 + 1)
+        for f in frames:
+            acc += np.abs(np.fft.rfft(f))
+        return acc / len(frames)
+
+    cut = getattr(args, "max_seconds", 0.0) or None
+    ref, sr_ref, _ = read_float(reference_path, max_seconds=cut)
+    if ref is None:
+        raise SystemExit("--master-emulate reference must be 16-bit PCM WAV")
+    target = avg_spectrum(ref.mean(axis=1), sr_ref)
+    ref_rms = float(np.sqrt(np.mean(ref.mean(axis=1) ** 2)) + 1e-12)
+
+    files = [Path(p) for p in keysound_files if Path(p).exists()]
+    # Source reference = the DRY MIX (sum of stems), because the keysounds SUM to ~that mix.
+    # Matching avg-of-individual-keysounds would be wrong (over-weights sparse parts) and
+    # yields a bogus broadband boost. Fall back to avg keysounds only if no stems given.
+    src_mix = None
+    source_kind = "dry-mix"
+    if dry_mix_sources:
+        seen = set()
+        for p in dry_mix_sources:
+            key = str(Path(p).resolve()).lower()
+            if key in seen or not Path(p).exists():
+                continue
+            seen.add(key)
+            x, sr, _ = read_float(Path(p), max_seconds=cut)
+            if x is None or sr != sr_ref:
+                continue
+            m = x.mean(axis=1)
+            if src_mix is None:
+                src_mix = m.astype(np.float64)
+            else:
+                n = min(len(src_mix), len(m))
+                src_mix = src_mix[:n] + m[:n]
+    if src_mix is not None:
+        source = avg_spectrum(src_mix, sr_ref)
+        dry_rms = float(np.sqrt(np.mean(src_mix ** 2)) + 1e-12)
+    else:
+        source_kind = "avg-keysounds"
+        import random
+        sample = files if len(files) <= 80 else random.sample(files, 80)
+        acc = None; cnt = 0; rms_acc = 0.0
+        for p in sample:
+            x, sr, _ = read_float(p)
+            if x is None or sr != sr_ref:
+                continue
+            s = avg_spectrum(x.mean(axis=1), sr)
+            if s is not None:
+                acc = s if acc is None else acc + s; cnt += 1
+        source = acc / cnt if cnt else None
+        dry_rms = ref_rms  # no makeup if we can't estimate the dry mix
+    if source is None or target is None:
+        raise SystemExit("--master-emulate: could not analyze spectra (need 16-bit WAV at the reference sample rate)")
+
+    eps = 1e-9
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr_ref)
+    ratio_db = 20 * np.log10((target + eps) / (source + eps))
+    # 1/3-octave smoothing to keep the matching curve gentle (no ringing)
+    smoothed = ratio_db.copy()
+    for i in range(len(ratio_db)):
+        f = freqs[i]
+        if f <= 0:
+            continue
+        lo = np.searchsorted(freqs, f / (2 ** (1 / 6)))
+        hi = np.searchsorted(freqs, f * (2 ** (1 / 6)))
+        if hi > lo:
+            smoothed[i] = float(np.mean(ratio_db[lo : hi + 1]))
+    max_db = float(getattr(args, "master_emulate_max_eq_db", 8.0))
+    smoothed = np.clip(smoothed, -max_db, max_db)
+    curve_lin = 10 ** (smoothed / 20.0)
+
+    # makeup: 0.0 (default) => auto-match the dry mix loudness to the reference master
+    makeup_arg = float(getattr(args, "master_emulate_makeup_db", 0.0))
+    if makeup_arg == 0.0:
+        makeup_db = float(np.clip(20 * np.log10(ref_rms / dry_rms), 0.0, 12.0))
+    else:
+        makeup_db = makeup_arg
+    makeup_lin = 10 ** (makeup_db / 20.0)
+    ceiling = 10 ** (float(getattr(args, "master_emulate_ceiling_db", -0.5)) / 20.0)
+
+    processed = 0
+    for path in files:
+        try:
+            x, sr, ch = read_float(path)
+            if x is None or sr != sr_ref:
+                continue
+            N = x.shape[0]
+            f2 = np.fft.rfftfreq(N, 1.0 / sr)
+            curve_i = np.interp(f2, freqs, curve_lin)
+            out = np.empty_like(x)
+            for c in range(x.shape[1]):
+                X = np.fft.rfft(x[:, c])
+                out[:, c] = np.fft.irfft(X * curve_i, n=N)
+            out *= makeup_lin
+            # soft (tanh) limiter: ~linear below ceiling, compresses peaks -> loudness/density
+            out = np.tanh(out / ceiling) * ceiling
+            out = np.clip(out, -1.0, 1.0)
+            ints = (out * 32767.0).astype("<i2")
+            with wave.open(str(path), "wb") as w:
+                w.setnchannels(x.shape[1]); w.setsampwidth(2); w.setframerate(sr)
+                w.writeframes(ints.tobytes())
+            processed += 1
+        except Exception:
+            continue
+
+    return {
+        "reference": str(reference_path),
+        "source_kind": source_kind,
+        "keysounds_processed": processed,
+        "max_eq_db": max_db,
+        "makeup_db": round(makeup_db, 2),
+        "ceiling_db": float(getattr(args, "master_emulate_ceiling_db", -0.5)),
+        "note": "matching EQ is exact (linear); makeup+soft limiter approximates master loudness; inter-instrument bus glue not reproduced",
+    }
+
+
 def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argparse.Namespace) -> Dict[str, object]:
     if args.background_layers < 1:
         raise SystemExit("--background-layers must be at least 1")
@@ -2168,6 +2328,18 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
             if code in used_wav_codes or code not in generated_paths
         }
 
+    master_emulate_summary: Optional[Dict[str, object]] = None
+    if getattr(args, "master_emulate", None):
+        kept_keysounds = [path for code, path in generated_paths.items() if code in wav_defs]
+        # dry-mix reference = the stem sources the keysounds were sliced from
+        dry_sources: List[Path] = []
+        dry_map = discover_track_audio_map(args.auto_track_audio_dir, midi.track_names)
+        dry_map.update(parse_track_audio_map(args.track_audio_map))
+        dry_sources.extend(dry_map.values())
+        if args.keysound_source:
+            dry_sources.append(Path(args.keysound_source))
+        master_emulate_summary = apply_master_emulation(kept_keysounds, args, dry_sources)
+
     grouped: Dict[Tuple[int, str, int], Dict[int, str]] = {}
     for event in events:
         grouped.setdefault((event.measure, event.channel, event.layer), {})[event.slot] = event.code
@@ -2219,6 +2391,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "bgm_stem_max_seconds": args.bgm_stem_max_seconds if bgm_stem_tracks else None,
         "keysound_fade_in_ms": args.keysound_fade_in_ms,
         "keysound_fade_out_ms": args.keysound_fade_out_ms,
+        "master_emulate": master_emulate_summary,
         "resolution": args.resolution,
         "mapping": mapping_mode,
         "lane_channels": lane_channels,
@@ -2547,6 +2720,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="MIDI/FLP track numbers placed as continuous BGM stems instead of per-note slices; "
         "best for reverb/sustain instruments (pads, strings, piano) that chop badly when sliced",
     )
+    parser.add_argument(
+        "--master-emulate",
+        help="reference master WAV (e.g. the FL master render); emulates its chain on each keysound: "
+        "a matching EQ (linear, exact tone match) + soft limiter (approx loudness). Requires numpy. "
+        "Note: non-linear inter-instrument bus glue cannot be reproduced from isolated slices",
+    )
+    parser.add_argument("--master-emulate-max-eq-db", type=float, default=8.0, help="max matching-EQ correction (dB)")
+    parser.add_argument("--master-emulate-makeup-db", type=float, default=0.0, help="global makeup gain before the soft limiter (dB)")
+    parser.add_argument("--master-emulate-ceiling-db", type=float, default=-0.5, help="soft-limiter ceiling (dBFS)")
     parser.add_argument(
         "--extra-bgm-stems",
         help="extra stem WAV paths placed as continuous BGM, NOT tied to any MIDI track "
