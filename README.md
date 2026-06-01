@@ -13,7 +13,7 @@
 ### Features
 - MIDI (`.mid`/`.midi`) and best-effort FL Studio (`.flp` via [pyflp](https://pypi.org/project/PyFLP/)) parsing
 - Per-note keysound slicing from track stems — keeps the real instrument timbre
-- **Continuous BGM-stem mode** (`--bgm-stem-tracks`): reverb/sustain instruments are placed whole as measure-aligned chunks instead of being chopped per note (no tail clipping)
+- **Continuous BGM-stem mode** (`--bgm-stem-tracks`): reverb/sustain instruments are placed whole as measure-aligned chunks instead of being chopped per note (no tail clipping). `--extra-bgm-stems` does the same for mixer inserts / audio-clip instruments that exported **no MIDI notes**, so nothing in the original mix goes missing
 - **Declick fades** on every slice, so cut edges don't pop
 - **IR-safe**: stem chunks stay under the ~30s keysound limit for ranking registration
 - **Per-track clip-overlap exclusion** (`--clip-overlap-exclude-tracks`) so piano/sustain rings naturally — BMS never note-offs a retriggered keysound
@@ -59,6 +59,7 @@ python -c "from pathlib import Path; from daw2bms import parse_midi; from collec
 - `#WAVxx` is base36 → **max 1296 keysounds**. Use `--keysound-reuse`, `--duration-bucket-ticks`, or `--max-seconds` if you exceed it.
 - `--synth-keysounds` uses a built-in draft synth; it does not sound like the real instrument.
 - Dense MIDI converted 1:1 makes unplayable charts — this produces a draft, not a finished chart.
+- **After converting, verify every non-silent stem/mixer insert is represented** (keysounded or stemmed). A forgotten insert is the #1 cause of "sounds different from the original" — feed inserts with no MIDI track through `--extra-bgm-stems`.
 - **You are responsible for the copyright of any MIDI/audio you feed in.** Do not commit other people's songs/stems to your repo.
 
 ### License
@@ -104,6 +105,7 @@ python daw2bms.py song.mid -o song.bms \
 - キー音は終端まで再生されます（ノートオフなし）。サステイン系は clip-overlap ではなく `--clip-overlap-exclude-tracks` に入れて重ねて響かせます。
 - `#WAVxx` は base36 → **キー音は最大 1296 個**。超える場合は再利用・時間カットを。
 - `--synth-keysounds` は内蔵の簡易シンセで、実際の音色とは異なります。
+- 変換後は**全ての非無音ステム/ミキサーインサートが反映されているか確認**を。抜けたインサートは「原曲と違う」の最大要因。MIDI ノートを持たないインサートは `--extra-bgm-stems` で追加します。
 - **入力する MIDI/音源の著作権は利用者の責任です。** 他人の楽曲/ステムをリポジトリに含めないでください。
 
 ### ライセンス
@@ -149,6 +151,7 @@ python daw2bms.py song.mid -o song.bms \
 - BMS 키음은 끝까지 재생됨(note-off 없음). 서스테인 악기는 clip-overlap 말고 `--clip-overlap-exclude-tracks`에 넣어 겹쳐 울리게.
 - `#WAVxx`는 base36 → **키음 최대 1296개**. 넘으면 재사용·시간컷 사용.
 - `--synth-keysounds`는 내장 간이 신스라 실제 음색과 다름.
+- 변환 후 **모든 비-무음 스템/믹서 인서트가 반영됐는지 확인**. 빠진 인서트 = "원곡과 다름"의 1순위 원인. MIDI 노트 없는 인서트는 `--extra-bgm-stems`로 추가.
 - **넣는 MIDI/음원의 저작권은 사용자 책임.** 남의 곡/스템을 레포에 올리지 마세요.
 
 ### 라이선스
