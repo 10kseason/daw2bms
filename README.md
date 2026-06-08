@@ -18,6 +18,8 @@
 - **IR-safe**: stem chunks stay under the ~30s keysound limit for ranking registration
 - **Per-track clip-overlap exclusion** (`--clip-overlap-exclude-tracks`) so piano/sustain rings naturally — BMS never note-offs a retriggered keysound
 - **Master-chain emulation** (`--master-emulate ref.wav`): shapes each keysound toward a reference master with a matching EQ + soft limiter. The EQ is *linear*, so it transfers exactly; the *non-linear* bus glue (cross-instrument compression/limiting) cannot be reproduced from isolated keysounds and is intentionally not faked
+- **88-key piano mode** (`--piano-bms`) with s/m/l duration tiers; same-time same-pitch notes keep only the longest tier so layered/doubled notes don't stack duplicate keysounds (`--no-piano-dedupe-duration-tiers` to keep all)
+- **Fixed-BPM conversion** (`--fixed-bpm N`): discard the MIDI tempo map and emit one fixed 4/4 BPM, quantizing every note by its real time (ms) to the nearest grid slot at that BPM and `--resolution` — playback timing stays in sync with `--bgm`
 - Keysound reuse, identical-WAV dedupe, silent-drop, peak normalize, anti-stack, 2-minute test cut
 - A `--summary-json` report for every conversion
 
@@ -80,6 +82,8 @@ DAW（MIDI / FL Studio FLP）から書き出したプロジェクトを、ステ
 - **マスターチェーン・エミュレーション**（`--master-emulate ref.wav`）：各キー音をリファレンスのマスターに合わせる。マッチングEQは*線形*なので正確に転写されるが、*非線形*のバスグルー（楽器間のコンプ/リミッター相互作用）は分離キー音では再現不可で、無理に偽装しない
 - **IR 対応**：ステムチャンクをキー音の約30秒制限内に分割
 - **トラック別 clip-overlap 除外**（`--clip-overlap-exclude-tracks`）：BMS は再発音してもノートオフしないので、ピアノ等は自然に響かせる
+- **88鍵ピアノモード**（`--piano-bms`）：s/m/l の長さ区分。同時刻・同音は最も長い区分だけ残し、レイヤー/重ねで入った音がキー音を同じマスに重複して積むのを防ぐ（`--no-piano-dedupe-duration-tiers` で全保持）
+- **BPM 固定変換**（`--fixed-bpm N`）：MIDI のテンポマップを捨てて 4/4・単一 BPM で出力。全ノートを実時間（ms）に換算し、指定 BPM と `--resolution` の格子で最も近いマスに配置 — `--bgm` と再生タイミングが揃う
 - キー音の再利用・同一WAVの重複排除・無音除去・ピーク正規化・アンチスタック・2分テストカット
 - 変換ごとに `--summary-json` レポート
 
@@ -127,6 +131,8 @@ DAW(MIDI / FL Studio FLP)에서 내보낸 프로젝트를, **스템에서 잘라
 - **마스터 체인 에뮬레이션**(`--master-emulate ref.wav`): 각 키음을 레퍼런스 마스터에 맞춰 매칭 EQ + 소프트 리미터 적용. EQ는 *선형*이라 정확히 전사되지만, *비선형* 버스 글루(악기 간 comp/limiter 상호작용)는 분리 키음으로 재현 불가 — 억지로 흉내내지 않음
 - **IR 대응**: 스템 청크를 키음 30초 제한 아래로 분할
 - **트랙별 clip-overlap 제외**(`--clip-overlap-exclude-tracks`): BMS는 재트리거해도 이전 키음이 안 꺼지므로 피아노/서스테인은 자연스럽게 울림
+- **88키 피아노 모드**(`--piano-bms`): s/m/l 길이 등급. 같은 시점·같은 음은 가장 긴 등급만 남겨(레이어/더블링으로 들어온) 같은 칸 키음 중복 쌓임을 방지(`--no-piano-dedupe-duration-tiers`로 끔)
+- **BPM 고정 변환**(`--fixed-bpm N`): MIDI 템포 맵을 버리고 4/4·단일 BPM으로 출력. 모든 노트를 실제 시간(ms)으로 환산해 지정 BPM·`--resolution` 격자에서 가장 가까운 칸에 배치 — `--bgm`과 재생 타이밍 유지
 - 키음 재사용·동일 WAV 중복제거·무음 제거·피크 정규화·anti-stack·2분 테스트컷
 - 변환마다 `--summary-json` 리포트
 
