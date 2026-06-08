@@ -736,6 +736,28 @@ def tick_to_measure_slot(
     return measure, slot
 
 
+def seconds_to_measure_slot(
+    seconds: float,
+    bpm: float,
+    resolution: int,
+) -> Tuple[int, int]:
+    """Quantize an absolute time (seconds) onto a fixed-BPM 4/4 BMS grid.
+
+    Used by --fixed-bpm: the MIDI tempo map is collapsed into real time, then
+    each note is snapped to the nearest of `resolution` slots inside a measure
+    that lasts four beats at the chosen BPM.
+    """
+    seconds_per_measure = 4.0 * 60.0 / bpm
+    measure_float = seconds / seconds_per_measure
+    measure = int(math.floor(measure_float + 1e-9))
+    position = (measure_float - measure) * resolution
+    slot = int(round(position))
+    if slot >= resolution:
+        measure += 1
+        slot = 0
+    return measure, slot
+
+
 def read_sample_map(path: Optional[Path]) -> Dict[int, str]:
     if not path:
         return {}
@@ -1155,6 +1177,45 @@ def allocate_piano_sample_wavs(
         bgm_code = next_free_wav_code(wav_defs)
         wav_defs[bgm_code] = Path(args.bgm).name
     return wav_defs, instance_codes, bgm_code
+
+
+def dedupe_piano_duration_tiers(
+    notes: Sequence[MidiNote],
+    midi: MidiData,
+    args: argparse.Namespace,
+) -> Tuple[List[MidiNote], int]:
+    """Drop shorter s/m/l piano samples when a longer tier shares the same tick+pitch.
+
+    A single struck key can surface as several overlapping MIDI notes of the same
+    pitch (layered velocity zones, doubled tracks, pedal-extended copies). After
+    s/m/l tiering they collapse onto the same BMS slot and stack duplicate
+    keysounds. Keep only the longest tier present at each (tick, pitch): an `m`
+    hit removes a same-time same-pitch `s`, and an `l` hit removes same-time
+    same-pitch `s` and `m`. Notes that already share the longest tier are kept.
+    """
+    if not getattr(args, "piano_dedupe_duration_tiers", True):
+        return list(notes), 0
+    grouped: Dict[Tuple[int, int], List[MidiNote]] = {}
+    for note in notes:
+        grouped.setdefault((note.tick, note.note), []).append(note)
+    kept: List[MidiNote] = []
+    dropped = 0
+    for group in grouped.values():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        ranks = [
+            PIANO_DURATION_PREFIXES.index(piano_duration_prefix(note, midi, args))
+            for note in group
+        ]
+        best_rank = max(ranks)
+        for note, rank in zip(group, ranks):
+            if rank == best_rank:
+                kept.append(note)
+            else:
+                dropped += 1
+    kept.sort(key=lambda note: (note.tick, note.track, note.note, note.channel))
+    return kept, dropped
 
 
 def merge_same_time_keysound_notes(
@@ -1837,9 +1898,28 @@ def apply_anti_stack_keysound_gain(
 
 
 def measure_boundary_times(
-    midi: MidiData, numerator: int, denominator: int, end_seconds: float
+    midi: MidiData,
+    numerator: int,
+    denominator: int,
+    end_seconds: float,
+    fixed_bpm: Optional[float] = None,
 ) -> List[float]:
-    """Absolute start time (seconds) of measure 0,1,2,... covering up to end_seconds."""
+    """Absolute start time (seconds) of measure 0,1,2,... covering up to end_seconds.
+
+    With `fixed_bpm` the grid is uniform (4/4 at that BPM), matching how
+    --fixed-bpm places notes, so BGM stem chunks stay aligned to the same
+    measure lines the chart uses.
+    """
+    if fixed_bpm is not None:
+        seconds_per_measure = 4.0 * 60.0 / fixed_bpm
+        times = [0.0]
+        measure = 1
+        while times[-1] < end_seconds:
+            times.append(measure * seconds_per_measure)
+            measure += 1
+            if measure > 100000:  # safety
+                break
+        return times
     ticks_per_measure = midi.ticks_per_quarter * numerator * (4.0 / denominator)
     times = [tick_to_seconds(0, midi.ticks_per_quarter, midi.tempos)]
     measure = 1
@@ -1861,6 +1941,7 @@ def allocate_bgm_stem_wavs(
     numerator: int,
     denominator: int,
     extra_sources: Optional[Sequence[Path]] = None,
+    fixed_bpm: Optional[float] = None,
 ) -> Tuple[Dict[str, str], List[Tuple[str, int, int]]]:
     """Place instrument stems as continuous BGM, split into measure-aligned chunks.
 
@@ -1934,7 +2015,7 @@ def allocate_bgm_stem_wavs(
             end_seconds = min(end_seconds, max_seconds_cut)
         if end_seconds <= 0:
             continue
-        boundaries = measure_boundary_times(midi, numerator, denominator, end_seconds)
+        boundaries = measure_boundary_times(midi, numerator, denominator, end_seconds, fixed_bpm)
         # greedily group consecutive measures so each chunk <= max_chunk seconds
         seg_start = 0
         span_count = len(boundaries) - 1  # number of full measure spans
@@ -2131,6 +2212,21 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         validate_piano_args(args)
     lane_channels = parse_lane_channels(args)
     numerator, denominator = initial_time_signature(midi)
+    fixed_bpm = getattr(args, "fixed_bpm", None)
+    if fixed_bpm is not None:
+        if fixed_bpm <= 0:
+            raise SystemExit("--fixed-bpm must be a positive number")
+        # collapse the MIDI tempo map onto a single uniform 4/4 grid
+        numerator, denominator = 4, 4
+
+    def measure_slot_for_tick(tick: int) -> Tuple[int, int]:
+        if fixed_bpm is not None:
+            seconds = tick_to_seconds(tick, midi.ticks_per_quarter, midi.tempos)
+            return seconds_to_measure_slot(seconds, fixed_bpm, args.resolution)
+        return tick_to_measure_slot(
+            tick, midi.ticks_per_quarter, numerator, denominator, args.resolution
+        )
+
     filtered_notes = filter_notes(
         midi.notes,
         args,
@@ -2138,9 +2234,13 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         use_channel_filter=not args.background_non_player_to_bgm,
         use_piano_soft_filter=not args.piano_bms,
     )
+    piano_duration_tiers_deduped = 0
     if args.piano_bms:
         filtered_notes = apply_piano_pedal_durations(filtered_notes, midi)
         filtered_notes = filter_soft_piano_notes(filtered_notes, args)
+        filtered_notes, piano_duration_tiers_deduped = dedupe_piano_duration_tiers(
+            filtered_notes, midi, args
+        )
     candidate_notes, time_cut_notes, time_clipped_notes = trim_notes_to_max_seconds(filtered_notes, midi, args)
     bgm_stem_tracks = parse_int_set(getattr(args, "bgm_stem_tracks", None), zero_based=True) or set()
     extra_bgm_stems: List[Path] = []
@@ -2243,13 +2343,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         if lane_index is None:
             skipped_notes += 1
             continue
-        measure, slot = tick_to_measure_slot(
-            note.tick,
-            midi.ticks_per_quarter,
-            numerator,
-            denominator,
-            args.resolution,
-        )
+        measure, slot = measure_slot_for_tick(note.tick)
         channel = lane_channels[lane_index]
         key = (measure, slot, channel, 0)
         if key in occupied:
@@ -2264,20 +2358,15 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
             continue
         events.append(PositionedEvent(measure, slot, channel, code))
 
-    bpm_events = build_bpm_events(midi, args.resolution, numerator, denominator)
-    events.extend(bpm_events)
+    if fixed_bpm is None:
+        bpm_events = build_bpm_events(midi, args.resolution, numerator, denominator)
+        events.extend(bpm_events)
     if bgm_code:
         events.append(PositionedEvent(0, 0, "01", bgm_code, 0))
         occupied_bgm.add((0, 0, 0))
 
     for background_index, note in enumerate(background_notes):
-        measure, slot = tick_to_measure_slot(
-            note.tick,
-            midi.ticks_per_quarter,
-            numerator,
-            denominator,
-            args.resolution,
-        )
+        measure, slot = measure_slot_for_tick(note.tick)
         code_index = len(player_notes) + background_index
         code = instance_codes[code_index] if uses_instance_codes else note_codes[note.note]
         if not code:
@@ -2300,7 +2389,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
     if bgm_stem_tracks or extra_bgm_stems:
         bgm_stem_wav_defs, bgm_stem_placements = allocate_bgm_stem_wavs(
             args, midi, output_path.parent, bgm_stem_tracks, set(wav_defs), numerator, denominator,
-            extra_sources=extra_bgm_stems,
+            extra_sources=extra_bgm_stems, fixed_bpm=fixed_bpm,
         )
         wav_defs.update(bgm_stem_wav_defs)
         stem_layer_cap = args.background_layers + len(bgm_stem_tracks) + len(extra_bgm_stems) + 4
@@ -2348,12 +2437,13 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         input_path=input_path,
         args=args,
         wav_defs=wav_defs,
-        bpm_defs=tempo_defs(midi),
+        bpm_defs={} if fixed_bpm is not None else tempo_defs(midi),
         grouped=grouped,
         resolution=args.resolution,
         numerator=numerator,
         denominator=denominator,
         midi=midi,
+        initial_bpm_override=fixed_bpm,
         filtered_note_count=len(player_notes),
         collisions=collisions,
         background_note_count=len(background_notes),
@@ -2393,6 +2483,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "keysound_fade_out_ms": args.keysound_fade_out_ms,
         "master_emulate": master_emulate_summary,
         "resolution": args.resolution,
+        "fixed_bpm": fixed_bpm,
         "mapping": mapping_mode,
         "lane_channels": lane_channels,
         "time_signature": f"{numerator}/{denominator}",
@@ -2407,6 +2498,8 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "piano_long_ms": args.piano_long_ms if args.piano_bms else None,
         "piano_min_velocity": args.piano_min_velocity if args.piano_bms else None,
         "piano_min_channel_volume": args.piano_min_channel_volume if args.piano_bms else None,
+        "piano_dedupe_duration_tiers": args.piano_dedupe_duration_tiers if args.piano_bms else None,
+        "piano_duration_tiers_deduped": piano_duration_tiers_deduped if args.piano_bms else None,
         "synth_keysounds": args.synth_keysounds,
         "merge_same_time_keysounds": args.merge_same_time_keysounds,
         "keysound_notes_merged": keysound_notes_merged,
@@ -2510,8 +2603,12 @@ def render_bms(
     skipped_notes: int,
     mapping_mode: str,
     lane_channels: Sequence[str],
+    initial_bpm_override: Optional[float] = None,
 ) -> List[str]:
-    initial_bpm = midi.tempos[0].bpm if midi.tempos else 120.0
+    if initial_bpm_override is not None:
+        initial_bpm = initial_bpm_override
+    else:
+        initial_bpm = midi.tempos[0].bpm if midi.tempos else 120.0
     title = args.title or midi.title or input_path.stem
     artist = args.artist or midi.artist or ""
     genre = args.genre or midi.genre or "BMS"
@@ -2593,6 +2690,13 @@ def build_warnings(
         warnings.append("keysounds were synthesized from MIDI note data using the built-in draft synth")
     if args.piano_bms:
         warnings.append("piano BMS mode used fixed #WAV01..#WAV7C sample names for 88 keys and s/m/l durations")
+        if args.piano_dedupe_duration_tiers:
+            warnings.append("same-time same-pitch piano notes kept only the longest s/m/l tier")
+    if getattr(args, "fixed_bpm", None):
+        warnings.append(
+            f"--fixed-bpm {format_bpm(args.fixed_bpm)} forced a single 4/4 tempo; notes were quantized "
+            "to the nearest grid slot at that BPM and the MIDI tempo map was discarded"
+        )
     if args.merge_same_time_keysounds:
         warnings.append("same-time notes from the same audio source were merged into single keysound slices")
     if args.keysound_no_reuse_tracks:
@@ -2696,6 +2800,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lane-notes", help="exact MIDI notes for lanes, e.g. 60,62,64,65,67,69,71")
     parser.add_argument("--mapping", choices=["pitch-order", "pitch-mod"], default="pitch-order")
     parser.add_argument("--resolution", type=int, default=192, help="BMS slots per measure")
+    parser.add_argument(
+        "--fixed-bpm",
+        type=float,
+        default=None,
+        help="ignore the MIDI tempo map: output one fixed 4/4 BPM and quantize every note to its "
+        "real time in ms, snapped to the nearest grid slot at this BPM and --resolution (default: off)",
+    )
     parser.add_argument("--midi-channels", help="1-based MIDI channels to include, comma-separated")
     parser.add_argument("--tracks", help="MIDI/FLP track numbers from the track check output to include, comma-separated")
     parser.add_argument("--player-tracks", help="MIDI/FLP track numbers from the track check output to keep on player lanes")
@@ -2777,6 +2888,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=1,
         help="drop piano notes below this MIDI channel volume controller value",
+    )
+    parser.add_argument(
+        "--piano-dedupe-duration-tiers",
+        dest="piano_dedupe_duration_tiers",
+        action="store_true",
+        default=True,
+        help="(default) at the same tick+pitch keep only the longest s/m/l piano tier: "
+        "an m removes a same-time s, an l removes same-time s and m",
+    )
+    parser.add_argument(
+        "--no-piano-dedupe-duration-tiers",
+        dest="piano_dedupe_duration_tiers",
+        action="store_false",
+        help="keep every s/m/l piano tier even when they stack on the same tick+pitch",
     )
     parser.add_argument(
         "--keysound-reuse",
@@ -2968,6 +3093,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             validate_piano_args(args)
             render_notes = apply_piano_pedal_durations(render_notes, midi)
             render_notes = filter_soft_piano_notes(render_notes, args)
+            render_notes, _ = dedupe_piano_duration_tiers(render_notes, midi, args)
         render_notes, _render_dropped, _render_clipped = trim_notes_to_max_seconds(render_notes, midi, args)
         render_summary = render_midi_synth_wav(Path(args.render_midi_wav), render_notes, midi, args)
     summary = build_bms(midi, input_path, output_path, args)
