@@ -191,8 +191,26 @@ python daw2bms.py "piano.mid" -o "piano_template.bms" ^
 - `--piano-long-ms 800`: `l_`로 넘어가는 기준
 - `--piano-min-velocity 8`: 너무 약한 note velocity 제거 기준
 - `--piano-min-channel-volume 8`: 너무 낮은 MIDI channel volume(CC 7) 제거 기준
+- `--piano-dedupe-duration-tiers`(기본 켜짐): 같은 시점·같은 음에서 가장 긴 s/m/l 등급만 남깁니다. `m` 키음이 배치되면 같은 시점·같은 음의 `s` 노트를 제거하고, `l` 키음이 배치되면 같은 시점·같은 음의 `s`/`m` 노트를 제거합니다. 한 번 친 건반이 레이어/더블링 때문에 여러 노트로 들어와 같은 칸에 키음이 겹쳐 쌓이는 것을 막습니다. 끄려면 `--no-piano-dedupe-duration-tiers`.
 
 피아노 모드는 MIDI 10번 채널을 자동 제외합니다. MIDI sustain pedal(CC 64)은 note-off 뒤 페달이 풀리는 시점 또는 같은 음이 다시 나오는 시점까지 길이를 늘려서 분류합니다. Sostenuto pedal(CC 66)은 페달이 눌린 순간 이미 울리던 음만 같은 방식으로 늘려서 분류합니다.
+
+## BPM 고정 변환 (`--fixed-bpm`)
+
+MIDI의 템포 맵을 무시하고 결과 BMS를 하나의 고정 BPM·4/4 박자로 출력합니다. 모든 노트는 MIDI 템포 맵을 기준으로 실제 재생 시간(ms)으로 환산된 뒤, 지정한 BPM과 `--resolution`이 만드는 격자에서 가장 가까운 칸에 배치됩니다. 격자가 실시간 기준으로 만들어지므로 노트의 재생 타이밍은 그대로 유지되고, `--bgm` 오디오와도 어긋나지 않습니다.
+
+```bat
+python daw2bms.py "song.mid" -o "song_fixed.bms" ^
+  --fixed-bpm 174 ^
+  --resolution 192 ^
+  --bgm "song.wav" ^
+  --summary-json "song_fixed.summary.json"
+```
+
+- 기본값은 꺼짐(없음)이며, 숫자값을 줄 때만 동작합니다.
+- 켜지면 출력 박자는 항상 4/4로 고정되고(`#xxxx02` 마디 길이 줄 없음), `#BPMxx` 템포 변경 정의와 `#xxxx08` 템포 채널은 만들어지지 않습니다. 헤더 `#BPM`만 지정한 값으로 들어갑니다.
+- 원곡에 템포 변화가 있어도 모두 실시간으로 펼친 뒤 한 BPM 격자에 스냅하므로, 잡은 BPM이 원곡 평균과 다르면 비트가 마디선과 어긋나 보일 수 있습니다(타이밍 자체는 맞음).
+- 같은 칸에 여러 노트가 몰리면 기존 충돌/레이어 규칙으로 처리됩니다.
 
 ## MIDI로 키음 WAV 생성
 
