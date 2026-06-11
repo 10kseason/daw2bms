@@ -1578,6 +1578,7 @@ def allocate_keysound_slices(
     notes: Sequence[MidiNote],
     midi: MidiData,
     output_dir: Path,
+    quantized_seconds_fn=None,
 ) -> Tuple[Dict[str, str], List[str], Optional[str], int, int, Dict[str, Path], Dict[str, object]]:
     if args.sample_map:
         raise SystemExit("--keysound-source/--track-audio-map cannot be combined with --sample-map")
@@ -1631,6 +1632,12 @@ def allocate_keysound_slices(
     dropped_silent = 0
     next_code = 1
     offset_seconds = args.audio_offset_ms / 1000.0
+    # partition mode: slice [this onset, next onset) so the slices tile the stem
+    # exactly -- no overlap doubling, no gaps, sum of keysounds == the stem waveform
+    partition_tracks = parse_int_set(getattr(args, "partition_keysound_tracks", None), zero_based=True) or set()
+    if partition_tracks and args.synth_keysounds:
+        raise SystemExit("--partition-keysound-tracks needs real stem audio; it cannot be combined with --synth-keysounds")
+    partition_onsets: Dict[str, set] = {}
     clip_overlap = bool(getattr(args, "clip_overlap_keysounds", False)) and not args.synth_keysounds
     clip_gap_seconds = max(0, int(getattr(args, "clip_overlap_gap_ms", 0) or 0)) / 1000.0
     clip_exclude_tracks = parse_int_set(getattr(args, "clip_overlap_exclude_tracks", None), zero_based=True) or set()
@@ -1647,16 +1654,29 @@ def allocate_keysound_slices(
         track_gain_db = track_gain_map.get(note.track, 0.0)
         source_identity = "synth" if args.synth_keysounds else str(note_source_path)
         start = tick_to_seconds(note.tick, midi.ticks_per_quarter, midi.tempos) + offset_seconds
-        group_key = keysound_group_key(note, index, args, keysound_no_reuse_tracks, midi) + (
-            source_identity,
-            round(track_gain_db, 6),
-        )
+        if note.track in partition_tracks:
+            if note_source_path is None:
+                raise SystemExit(
+                    f"--partition-keysound-tracks track {note.track}:{midi.track_names.get(note.track, '?')} "
+                    "has no stem WAV; map it via --track-audio-map or --auto-track-audio-dir"
+                )
+            # cut at the SAME quantized grid time the BMS will trigger, so playback
+            # reassembles the stem sample-exactly; same-time notes share one slice
+            if quantized_seconds_fn is not None:
+                start = quantized_seconds_fn(note.tick) + offset_seconds
+            group_key = ("partition", source_identity, round(start, 9), round(track_gain_db, 6))
+            partition_onsets.setdefault(source_identity, set()).add(round(start, 9))
+        else:
+            group_key = keysound_group_key(note, index, args, keysound_no_reuse_tracks, midi) + (
+                source_identity,
+                round(track_gain_db, 6),
+            )
         note_source_paths.append(note_source_path)
         track_gain_dbs.append(track_gain_db)
         source_identities.append(source_identity)
         start_seconds_by_index.append(start)
         group_keys.append(group_key)
-        if clip_overlap and note_source_path is not None and note.track not in clip_exclude_tracks:
+        if clip_overlap and note_source_path is not None and note.track not in clip_exclude_tracks and note.track not in partition_tracks:
             # excluded tracks (e.g. piano) keep their full decay; BMS does not note-off a
             # retriggered keysound, so overlapping decays ring naturally like the real instrument
             source_positions.setdefault(source_identity, []).append((max(0.0, start), index))
@@ -1670,10 +1690,30 @@ def allocate_keysound_slices(
                 if next_distinct_start is None or start < next_distinct_start - 1e-9:
                     next_distinct_start = start
 
+    # partition slice length = gap to the next onset on the same source (capped for
+    # the BMS IR keysound limit and the --max-seconds song cut)
+    partition_lengths: Dict[Tuple[str, float], float] = {}
+    if partition_onsets:
+        max_chunk = max(1.0, float(getattr(args, "bgm_stem_max_seconds", 28.0)))
+        limit_seconds = args.max_seconds + offset_seconds if args.max_seconds and args.max_seconds > 0 else None
+        for source_identity, onsets in partition_onsets.items():
+            ordered = sorted(onsets)
+            for i, onset in enumerate(ordered):
+                end = ordered[i + 1] if i + 1 < len(ordered) else onset + max_chunk
+                end = min(end, onset + max_chunk)
+                if limit_seconds is not None:
+                    end = min(end, limit_seconds)
+                partition_lengths[(source_identity, onset)] = max(0.001, end - onset)
+
     group_slice_seconds: Dict[Tuple[object, ...], float] = {}
     overlap_events_clipped = 0
     overlap_max_reduce_ms = 0.0
     for index, note in enumerate(notes):
+        if note.track in partition_tracks:
+            group_slice_seconds[group_keys[index]] = partition_lengths[
+                (source_identities[index], round(start_seconds_by_index[index], 9))
+            ]
+            continue
         requested_seconds = note_slice_seconds(note, midi, args)
         effective_seconds = requested_seconds
         clip_cap = clip_caps[index]
@@ -1732,6 +1772,10 @@ def allocate_keysound_slices(
                 )
             fade_in_ms = getattr(args, "keysound_fade_in_ms", 0.0)
             fade_out_ms = getattr(args, "keysound_fade_out_ms", 0.0)
+            if note.track in partition_tracks:
+                # tiles must stay sample-exact; in sequence each cut is masked by the
+                # next slice starting on that very sample, so no declick is needed
+                fade_in_ms = fade_out_ms = 0.0
             peak = write_wav_slice(note_source_path, output_wav_path, start, slice_seconds, fade_in_ms, fade_out_ms)
             if peak == 0 and source_path is not None and note_source_path != source_path:
                 peak = write_wav_slice(source_path, output_wav_path, start, slice_seconds, fade_in_ms, fade_out_ms)
@@ -1749,6 +1793,7 @@ def allocate_keysound_slices(
             except OSError:
                 pass
             dropped_silent += 1
+            next_code -= 1  # the code was never referenced; return it to the pool
             continue
 
         if args.dedupe_identical_keysounds:
@@ -1763,6 +1808,7 @@ def allocate_keysound_slices(
                 except OSError:
                     pass
                 deduped_identical += 1
+                next_code -= 1  # the code was never referenced; return it to the pool
                 continue
             content_codes[content_hash] = code
         generated_paths[code] = output_wav_path
@@ -2453,6 +2499,22 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         or args.auto_track_audio_dir
         or args.synth_keysounds
     )
+    # partition slicing cuts stems at the same quantized grid times the chart will
+    # trigger, so consecutive slices reassemble the stem sample-exactly on playback
+    quantized_seconds_fn = None
+    if getattr(args, "partition_keysound_tracks", None):
+        horizon = 10.0
+        if midi.notes:
+            horizon = tick_to_seconds(max(n.tick for n in midi.notes), midi.ticks_per_quarter, midi.tempos) + 60.0
+        partition_boundaries = measure_boundary_times(midi, numerator, denominator, horizon, fixed_bpm)
+
+        def quantized_seconds_fn(tick: int) -> float:
+            measure, slot = measure_slot_for_tick(tick)
+            while measure + 1 >= len(partition_boundaries):
+                partition_boundaries.append(partition_boundaries[-1] + (partition_boundaries[-1] - partition_boundaries[-2]))
+            span = partition_boundaries[measure + 1] - partition_boundaries[measure]
+            return partition_boundaries[measure] + (slot / float(args.resolution)) * span
+
     if args.piano_bms:
         wav_defs, instance_codes, bgm_code = allocate_piano_sample_wavs(args, output_notes, midi)
     elif args.keysound_source or args.track_audio_map or args.auto_track_audio_dir or args.synth_keysounds:
@@ -2469,6 +2531,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
             output_notes,
             midi,
             output_path.parent,
+            quantized_seconds_fn=quantized_seconds_fn,
         )
         note_codes: Dict[int, str] = {}
     else:
@@ -2696,6 +2759,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "keysound_notes_merged": keysound_notes_merged,
         "keysound_merge_max_group": keysound_merge_max_group,
         "keysound_no_reuse_tracks": args.keysound_no_reuse_tracks,
+        "partition_keysound_tracks": getattr(args, "partition_keysound_tracks", None),
         "normalize_keysounds": args.normalize_keysounds,
         "normalize_target_db": args.normalize_target_db if args.normalize_keysounds else None,
         "track_gain_map": args.track_gain_map,
@@ -2897,6 +2961,11 @@ def build_warnings(
         warnings.append("same-time notes from the same audio source were merged into single keysound slices")
     if args.keysound_no_reuse_tracks:
         warnings.append("selected tracks bypassed keysound reuse and were sliced per occurrence")
+    if getattr(args, "partition_keysound_tracks", None):
+        warnings.append(
+            "partition-sliced tracks tile their stem gaplessly at chart-grid onsets; "
+            "played in sequence the slices reassemble the original waveform exactly"
+        )
     if args.dedupe_same_time_bgm_code:
         warnings.append("duplicate same-time BGM WAV-code events were deduplicated")
     generated_keysound_mode = bool(args.keysound_source or args.track_audio_map or args.auto_track_audio_dir or args.synth_keysounds)
@@ -3135,6 +3204,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=8,
         help="measure bucket size for --keysound-time-bucket-tracks",
+    )
+    parser.add_argument(
+        "--partition-keysound-tracks",
+        help="MIDI/FLP track numbers whose stems are sliced as a gapless onset partition: each keysound "
+        "runs [this onset, next onset) cut at the quantized chart grid, so the slices tile the stem with "
+        "no overlap doubling and no gaps -- played in sequence they reassemble the original waveform "
+        "sample-exactly, and each hit keeps its natural ring until the next one. Bypasses keysound reuse "
+        "and clip-overlap for those tracks (identical-content dedupe still applies), e.g. 2,5,6,10",
     )
     parser.add_argument(
         "--clip-overlap-keysounds",

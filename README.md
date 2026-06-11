@@ -13,6 +13,7 @@
 ### Features
 - MIDI (`.mid`/`.midi`) and best-effort FL Studio (`.flp` via [pyflp](https://pypi.org/project/PyFLP/)) parsing
 - Per-note keysound slicing from track stems — keeps the real instrument timbre
+- **Waveform-preserving partition slicing** (`--partition-keysound-tracks`): stems are cut as a gapless onset-to-onset tiling at the quantized chart grid — no overlap doubling, no gaps, the slices reassemble the original waveform sample-exactly, and every hit keeps its natural ring until the next one
 - **Continuous BGM-stem mode** (`--bgm-stem-tracks`): reverb/sustain instruments are placed whole as measure-aligned chunks instead of being chopped per note (no tail clipping). `--extra-bgm-stems` does the same for mixer inserts / audio-clip instruments that exported **no MIDI notes**, so nothing in the original mix goes missing
 - **Declick fades** on every slice, so cut edges don't pop
 - **IR-safe**: stem chunks stay under the ~30s keysound limit for ranking registration
@@ -78,6 +79,7 @@ DAW（MIDI / FL Studio FLP）から書き出したプロジェクトを、ステ
 ### 主な機能
 - MIDI（`.mid`/`.midi`）と FL Studio（`.flp`、pyflp による best-effort）の解析
 - トラックのステムからノートごとにキー音をスライス（実際の音色を保持）
+- **波形保存パーティションスライス**（`--partition-keysound-tracks`）：ステムをオンセット間の隙間なしタイルとして量子化グリッドで切る — 重なりの二重化もギャップもなく、スライスを順に鳴らすと**元の波形がサンプル単位で再構成**され、各ヒットは次のヒットまで自然な余韻を保つ
 - **連続 BGM ステムモード**（`--bgm-stem-tracks`）：リバーブ/サステイン系はノート単位で刻まず、小節境界のチャンクとして丸ごと配置（テールが切れない）
 - 全スライスに**デクリック・フェード**（切れ目のプチノイズ防止）
 - **マスターチェーン・エミュレーション**（`--master-emulate ref.wav`）：各キー音をリファレンスのマスターに合わせる。マッチングEQは*線形*なので正確に転写されるが、*非線形*のバスグルー（楽器間のコンプ/リミッター相互作用）は分離キー音では再現不可で、無理に偽装しない
@@ -128,6 +130,7 @@ DAW(MIDI / FL Studio FLP)에서 내보낸 프로젝트를, **스템에서 잘라
 ### 주요 기능
 - MIDI(`.mid`/`.midi`) 및 FL Studio(`.flp`, pyflp best-effort) 파싱
 - 트랙 스템에서 노트별 키음 슬라이스 — 실제 음색 유지
+- **원곡 파형 보존 파티션 슬라이스**(`--partition-keysound-tracks`): 스템을 온셋→온셋 빈틈없는 타일로 양자화 격자에서 자름 — 겹침 더블링·빈틈 0, 순서대로 재생하면 **원본 파형이 샘플 단위로 재조립**되고 각 타격은 다음 타격까지 자연스러운 여운 유지
 - **연속 BGM 스템 모드**(`--bgm-stem-tracks`): 리버브/서스테인 악기는 노트별로 안 자르고 마디 경계 청크로 통째 배치 → 꼬리 안 잘림
 - 모든 슬라이스에 **declick 페이드** (잘린 끝 "툭" 제거)
 - **마스터 체인 에뮬레이션**(`--master-emulate ref.wav`): 각 키음을 레퍼런스 마스터에 맞춰 매칭 EQ + 소프트 리미터 적용. EQ는 *선형*이라 정확히 전사되지만, *비선형* 버스 글루(악기 간 comp/limiter 상호작용)는 분리 키음으로 재현 불가 — 억지로 흉내내지 않음
