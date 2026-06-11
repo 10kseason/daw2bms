@@ -18,6 +18,7 @@
 - **IR-safe**: stem chunks stay under the ~30s keysound limit for ranking registration
 - **Per-track clip-overlap exclusion** (`--clip-overlap-exclude-tracks`) so piano/sustain rings naturally — BMS never note-offs a retriggered keysound
 - **Master-chain emulation** (`--master-emulate ref.wav`): shapes each keysound toward a reference master with a matching EQ + soft limiter. The EQ is *linear*, so it transfers exactly; the *non-linear* bus glue (cross-instrument compression/limiting) cannot be reproduced from isolated keysounds and is intentionally not faked
+- **Master residual bed** (`--master-residual-bed master.wav`): simulates the exact mix the BMS will play (every keysound at its scheduled time) and lays `master − simulated mix` as a measure-chunked BGM bed — autoplay then sums back to the master render **sample-exactly**, non-linear bus glue and slice artifacts included; a missed note degrades cleanly to `master − that slice`. Needs stems/master rendered sample-aligned from the same project
 - **88-key piano mode** (`--piano-bms`) with s/m/l duration tiers; same-time same-pitch notes keep only the longest tier so layered/doubled notes don't stack duplicate keysounds (`--no-piano-dedupe-duration-tiers` to keep all)
 - **Fixed-BPM conversion** (`--fixed-bpm N`): discard the MIDI tempo map and emit one fixed 4/4 BPM, quantizing every note by its real time (ms) to the nearest grid slot at that BPM and `--resolution` — playback timing stays in sync with `--bgm`
 - Keysound reuse, identical-WAV dedupe, silent-drop, peak normalize, anti-stack, 2-minute test cut
@@ -80,6 +81,7 @@ DAW（MIDI / FL Studio FLP）から書き出したプロジェクトを、ステ
 - **連続 BGM ステムモード**（`--bgm-stem-tracks`）：リバーブ/サステイン系はノート単位で刻まず、小節境界のチャンクとして丸ごと配置（テールが切れない）
 - 全スライスに**デクリック・フェード**（切れ目のプチノイズ防止）
 - **マスターチェーン・エミュレーション**（`--master-emulate ref.wav`）：各キー音をリファレンスのマスターに合わせる。マッチングEQは*線形*なので正確に転写されるが、*非線形*のバスグルー（楽器間のコンプ/リミッター相互作用）は分離キー音では再現不可で、無理に偽装しない
+- **マスター残差ベッド**（`--master-residual-bed master.wav`）：BMS が実際に鳴らすミックス（全キー音をスケジュール時刻で合算）をシミュレートし、`マスター − シミュレートミックス` を小節チャンクの BGM ベッドとして敷く — オートプレイの合計が**サンプル単位でマスターレンダーに一致**（非線形バスグルーもスライス副作用も込み）。ミスしたノートは `マスター − そのスライス` にきれいに劣化。ステムとマスターは同一プロジェクトからサンプル整列でレンダーすること
 - **IR 対応**：ステムチャンクをキー音の約30秒制限内に分割
 - **トラック別 clip-overlap 除外**（`--clip-overlap-exclude-tracks`）：BMS は再発音してもノートオフしないので、ピアノ等は自然に響かせる
 - **88鍵ピアノモード**（`--piano-bms`）：s/m/l の長さ区分。同時刻・同音は最も長い区分だけ残し、レイヤー/重ねで入った音がキー音を同じマスに重複して積むのを防ぐ（`--no-piano-dedupe-duration-tiers` で全保持）
@@ -129,6 +131,7 @@ DAW(MIDI / FL Studio FLP)에서 내보낸 프로젝트를, **스템에서 잘라
 - **연속 BGM 스템 모드**(`--bgm-stem-tracks`): 리버브/서스테인 악기는 노트별로 안 자르고 마디 경계 청크로 통째 배치 → 꼬리 안 잘림
 - 모든 슬라이스에 **declick 페이드** (잘린 끝 "툭" 제거)
 - **마스터 체인 에뮬레이션**(`--master-emulate ref.wav`): 각 키음을 레퍼런스 마스터에 맞춰 매칭 EQ + 소프트 리미터 적용. EQ는 *선형*이라 정확히 전사되지만, *비선형* 버스 글루(악기 간 comp/limiter 상호작용)는 분리 키음으로 재현 불가 — 억지로 흉내내지 않음
+- **마스터 잔차 베드**(`--master-residual-bed master.wav`): BMS가 실제로 낼 믹스(전 키음을 배치 시각에 합산)를 시뮬레이션하고 `마스터 − 시뮬레이션 믹스`를 마디 청크 BGM 베드로 깔아줌 — 오토플레이 합이 **샘플 단위로 마스터 렌더와 일치**(비선형 버스 글루·슬라이스 부작용 포함). 노트를 놓치면 `마스터 − 그 슬라이스`로 우아하게 열화. 스템·마스터는 같은 프로젝트에서 샘플 정렬로 렌더돼 있어야 함
 - **IR 대응**: 스템 청크를 키음 30초 제한 아래로 분할
 - **트랙별 clip-overlap 제외**(`--clip-overlap-exclude-tracks`): BMS는 재트리거해도 이전 키음이 안 꺼지므로 피아노/서스테인은 자연스럽게 울림
 - **88키 피아노 모드**(`--piano-bms`): s/m/l 길이 등급. 같은 시점·같은 음은 가장 긴 등급만 남겨(레이어/더블링으로 들어온) 같은 칸 키음 중복 쌓임을 방지(`--no-piano-dedupe-duration-tiers`로 끔)
