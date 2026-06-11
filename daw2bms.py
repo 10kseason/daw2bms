@@ -1942,6 +1942,7 @@ def allocate_bgm_stem_wavs(
     denominator: int,
     extra_sources: Optional[Sequence[Path]] = None,
     fixed_bpm: Optional[float] = None,
+    residual_source: Optional[Path] = None,
 ) -> Tuple[Dict[str, str], List[Tuple[str, int, int]]]:
     """Place instrument stems as continuous BGM, split into measure-aligned chunks.
 
@@ -1957,7 +1958,7 @@ def allocate_bgm_stem_wavs(
     as (code, measure, slot=0).
     """
     extra_sources = list(extra_sources or [])
-    if not stem_tracks and not extra_sources:
+    if not stem_tracks and not extra_sources and residual_source is None:
         return {}, []
     track_audio_map = discover_track_audio_map(args.auto_track_audio_dir, midi.track_names)
     track_audio_map.update(parse_track_audio_map(args.track_audio_map))
@@ -1994,6 +1995,8 @@ def allocate_bgm_stem_wavs(
         sources.append((f"t{track:02d}", source, track_gain_map.get(track, 0.0)))
     for i, source in enumerate(extra_sources):
         sources.append((f"x{i:02d}", Path(source), 0.0))
+    if residual_source is not None:
+        sources.append(("res", Path(residual_source), 0.0))
 
     wav_defs: Dict[str, str] = {}
     placements: List[Tuple[str, int, int]] = []
@@ -2041,6 +2044,157 @@ def allocate_bgm_stem_wavs(
             placements.append((code, seg_start, 0))
             seg_start = seg_end
     return wav_defs, placements
+
+
+def build_master_residual_bed(
+    args: argparse.Namespace,
+    midi: MidiData,
+    events: Sequence["PositionedEvent"],
+    wav_defs: Dict[str, str],
+    output_path: Path,
+    numerator: int,
+    denominator: int,
+    fixed_bpm: Optional[float],
+) -> Tuple[Path, Dict[str, object]]:
+    """Render (master - simulated autoplay mix) as a WAV for continuous BGM placement.
+
+    A BMS player has no effect engine: it only sums WAVs. Non-linear master glue
+    (limiter/compressor acting on the FULL mix) therefore cannot live inside
+    per-keysound files -- f(A+B) != f(A)+f(B). The one signal that DOES survive
+    plain summation is a residual. We simulate exactly what the player will sum
+    (every placed WAV at its measure/slot time, deterministic) and take
+
+        residual = master - simulated_mix
+
+    so that on autoplay  simulated_mix + residual == master  sample-exactly
+    (minus 16-bit quantization). Computing against the SIMULATED mix rather than
+    the stem sum also cancels per-note slice imperfections (declick fades, tail
+    overlap doubling, keysound reuse substitution); a missed player note still
+    degrades cleanly to  master - that one slice.
+
+    Hard requirements: stems/master from the same project render (same sample
+    rate, aligned at t=0) and no later re-gain/normalize of the generated WAVs.
+    Mid-measure tempo changes make slot timing approximate; a single-tempo song
+    or --fixed-bpm is exact.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise SystemExit("--master-residual-bed requires numpy: python -m pip install numpy")
+
+    master_path = Path(args.master_residual_bed)
+    if not master_path.exists():
+        raise SystemExit(f"--master-residual-bed master WAV not found: {master_path}")
+
+    def read_float(path: Path):
+        with wave.open(str(path), "rb") as w:
+            sr, ch, sw, n = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
+            data = w.readframes(n)
+        if sw != 2:
+            raise SystemExit(f"--master-residual-bed needs 16-bit PCM WAVs (got {sw * 8}-bit): {path}")
+        a = np.frombuffer(data, dtype="<i2").astype(np.float64) / 32768.0
+        return a.reshape(-1, ch), sr
+
+    master, sr_master = read_float(master_path)
+    channels = master.shape[1]
+
+    playable = [e for e in events if e.channel not in ("03", "08") and e.code in wav_defs]
+    if not playable:
+        raise SystemExit("--master-residual-bed found no placed keysound events to simulate")
+    max_measure = max(e.measure for e in playable)
+    # generous horizon; measure_boundary_times stops once it passes end_seconds
+    boundaries = measure_boundary_times(midi, numerator, denominator, 1e9, fixed_bpm)
+    while len(boundaries) < max_measure + 2:
+        boundaries.append(boundaries[-1] + (boundaries[-1] - boundaries[-2]))
+
+    cache: Dict[str, object] = {}
+    missing_files = 0
+    mix = np.zeros((len(master) + sr_master * 40, channels))
+    for event in playable:
+        wav = cache.get(event.code)
+        if wav is None:
+            path = output_path.parent / wav_defs[event.code]
+            if not path.exists():
+                missing_files += 1
+                cache[event.code] = "missing"
+                continue
+            x, sr = read_float(path)
+            if sr != sr_master:
+                raise SystemExit(f"--master-residual-bed: keysound sample rate {sr} != master {sr_master}: {path}")
+            if x.shape[1] != channels:
+                x = np.repeat(x.mean(axis=1, keepdims=True), channels, axis=1)
+            cache[event.code] = x
+            wav = x
+        if isinstance(wav, str):
+            missing_files += 1
+            continue
+        measure_start = boundaries[event.measure]
+        measure_len = boundaries[event.measure + 1] - boundaries[event.measure]
+        t = measure_start + (event.slot / float(args.resolution)) * measure_len
+        s = int(round(t * sr_master))
+        e = min(s + len(wav), len(mix))
+        if e > s:
+            mix[s:e] += wav[: e - s]
+
+    if len(master) < len(mix):
+        master_pad = np.vstack([master, np.zeros((len(mix) - len(master), channels))])
+    else:
+        master_pad = master
+    residual = master_pad - mix[: len(master_pad)]
+    # the bed only needs to run while the master does; past it everything is cancellation
+    # of slice tails, which the chunker would drop at --max-seconds anyway
+    residual = residual[: len(master)]
+
+    def rms_db(x) -> float:
+        return float(20 * np.log10(np.sqrt(np.mean(x.mean(axis=1) ** 2)) + 1e-12))
+
+    master_rms = rms_db(master)
+    residual_rms = rms_db(residual)
+    peak = float(np.abs(residual).max())
+    # a 16-bit WAV holds [-1, 1); a hot residual is split into N identical stacked
+    # copies at 1/N gain (the chunker places the bed N times), so nothing clips
+    split_parts = max(1, min(4, int(math.ceil(peak + 1e-9))))
+    scaled = residual / split_parts
+    clipped = int((np.abs(scaled) >= 1.0).sum())
+    residual_path = output_path.parent / f"{output_path.stem}_master_residual.wav"
+    ints = (np.clip(scaled, -1.0, 32767.0 / 32768.0) * 32768.0).astype("<i2")
+    with wave.open(str(residual_path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(sr_master)
+        w.writeframes(ints.tobytes())
+
+    summary: Dict[str, object] = {
+        "master": str(master_path),
+        "events_simulated": len(playable) - missing_files,
+        "keysound_files_missing": missing_files,
+        "residual_wav": str(residual_path),
+        "master_rms_db": round(master_rms, 2),
+        "simulated_mix_rms_db": round(rms_db(mix[: len(master)]), 2),
+        "residual_rms_db": round(residual_rms, 2),
+        "residual_to_master_db": round(residual_rms - master_rms, 2),
+        "residual_peak": round(peak, 4),
+        "split_parts": split_parts,
+        "clipped_samples": clipped,
+        "note": "autoplay = simulated mix + residual = the master render, sample-exact",
+    }
+    if len(midi.tempos) > 1 and fixed_bpm is None:
+        summary["tempo_warning"] = (
+            "multiple tempo events: slot times inside changing measures are interpolated, "
+            "so the residual may not cancel sample-exactly there"
+        )
+        print(f"warning: {summary['tempo_warning']}", file=sys.stderr)
+    if residual_rms - master_rms > 3.0:
+        summary["alignment_warning"] = (
+            "residual is much louder than the master itself; the stems are probably NOT sample-aligned "
+            "with the master render (re-export both from the same project, same length)"
+        )
+        print(f"warning: {summary['alignment_warning']}", file=sys.stderr)
+    if clipped:
+        print(f"warning: master residual clipped on {clipped} samples (peak {peak:.3f}); identity is approximate there", file=sys.stderr)
+    if getattr(args, "track_gain_map", None):
+        print("warning: --track-gain-map changes the simulated mix after the fact; keep gains off for an exact residual", file=sys.stderr)
+    return residual_path, summary
 
 
 def apply_master_emulation(keysound_files: Sequence[Path], args: argparse.Namespace, dry_mix_sources: Optional[Sequence[Path]] = None) -> Dict[str, object]:
@@ -2384,6 +2538,15 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         occupied_bgm.add((measure, slot, layer))
         events.append(PositionedEvent(measure, slot, "01", code, layer))
 
+    if getattr(args, "master_residual_bed", None):
+        if getattr(args, "master_emulate", None):
+            raise SystemExit(
+                "--master-residual-bed and --master-emulate are mutually exclusive: EQ'd keysounds "
+                "no longer sum to the mix the residual was computed against"
+            )
+        if getattr(args, "normalize_keysounds", False):
+            raise SystemExit("--master-residual-bed requires raw keysound levels; drop --normalize-keysounds")
+
     bgm_stem_wav_defs: Dict[str, str] = {}
     bgm_stem_placements: List[Tuple[str, int, int]] = []
     if bgm_stem_tracks or extra_bgm_stems:
@@ -2428,6 +2591,33 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         if args.keysound_source:
             dry_sources.append(Path(args.keysound_source))
         master_emulate_summary = apply_master_emulation(kept_keysounds, args, dry_sources)
+
+    # master residual bed: computed against the FINAL event list (all WAV gains and
+    # placements settled), then chunked and placed like any other BGM stem
+    master_residual_summary: Optional[Dict[str, object]] = None
+    if getattr(args, "master_residual_bed", None):
+        residual_path, master_residual_summary = build_master_residual_bed(
+            args, midi, events, wav_defs, output_path, numerator, denominator, fixed_bpm
+        )
+        # a residual hotter than full scale was written at 1/N gain; stack N copies
+        # (distinct codes, same chunk files) so the placed layers sum back to it
+        split_parts = int(master_residual_summary.get("split_parts", 1))
+        res_layer_cap = args.background_layers + len(bgm_stem_tracks) + len(extra_bgm_stems) + 5 + split_parts
+        chunks_placed = 0
+        for _ in range(split_parts):
+            res_defs, res_placements = allocate_bgm_stem_wavs(
+                args, midi, output_path.parent, set(), set(wav_defs), numerator, denominator,
+                fixed_bpm=fixed_bpm, residual_source=residual_path,
+            )
+            wav_defs.update(res_defs)
+            for code, measure, slot in res_placements:
+                layer = first_free_bgm_layer(occupied_bgm, measure, slot, res_layer_cap)
+                if layer is None:
+                    continue
+                occupied_bgm.add((measure, slot, layer))
+                events.append(PositionedEvent(measure, slot, "01", code, layer))
+                chunks_placed += 1
+        master_residual_summary["chunks_placed"] = chunks_placed
 
     grouped: Dict[Tuple[int, str, int], Dict[int, str]] = {}
     for event in events:
@@ -2482,6 +2672,7 @@ def build_bms(midi: MidiData, input_path: Path, output_path: Path, args: argpars
         "keysound_fade_in_ms": args.keysound_fade_in_ms,
         "keysound_fade_out_ms": args.keysound_fade_out_ms,
         "master_emulate": master_emulate_summary,
+        "master_residual_bed": master_residual_summary,
         "resolution": args.resolution,
         "fixed_bpm": fixed_bpm,
         "mapping": mapping_mode,
@@ -2697,6 +2888,11 @@ def build_warnings(
             f"--fixed-bpm {format_bpm(args.fixed_bpm)} forced a single 4/4 tempo; notes were quantized "
             "to the nearest grid slot at that BPM and the MIDI tempo map was discarded"
         )
+    if getattr(args, "master_residual_bed", None):
+        warnings.append(
+            "master residual bed placed as BGM; autoplay sums back to the master render -- "
+            "do not re-gain or normalize the generated keysounds afterwards"
+        )
     if args.merge_same_time_keysounds:
         warnings.append("same-time notes from the same audio source were merged into single keysound slices")
     if args.keysound_no_reuse_tracks:
@@ -2845,6 +3041,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="extra stem WAV paths placed as continuous BGM, NOT tied to any MIDI track "
         "(for audio-clip instruments / mixer inserts that exported no notes), comma-separated. "
         'e.g. "Insert 5.wav,FX.wav"',
+    )
+    parser.add_argument(
+        "--master-residual-bed",
+        help="master render WAV; simulates the exact mix the BMS will play and places "
+        "(master - simulated mix) as a continuous BGM bed, so autoplay sums back to the master "
+        "render sample-exactly -- including the non-linear master bus glue (limiter/compressor) "
+        "and slice artifacts that per-keysound processing cannot reproduce. "
+        "Requires numpy and stems sample-aligned with the master (same project render). "
+        "Mutually exclusive with --master-emulate and --normalize-keysounds",
     )
     parser.add_argument(
         "--bgm-stem-max-seconds",
