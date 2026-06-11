@@ -24,6 +24,7 @@
 - **Fixed-BPM conversion** (`--fixed-bpm N`): discard the MIDI tempo map and emit one fixed 4/4 BPM, quantizing every note by its real time (ms) to the nearest grid slot at that BPM and `--resolution` — playback timing stays in sync with `--bgm`
 - Keysound reuse, identical-WAV dedupe, silent-drop, peak normalize, anti-stack, 2-minute test cut
 - A `--summary-json` report for every conversion
+- **GUI** (`daw2bms_gui.py` / `daw2bms-gui.exe`): pick the MIDI/FLP, point at the stem folder, set per-track modes (partition / stem BGM / per-note / skip), unmapped stems are auto-offered as extra BGM so nothing goes missing, optional master residual bed — then convert. Build your own exe with `pyinstaller --onefile --windowed --name daw2bms-gui --collect-all pyflp daw2bms_gui.py`
 
 ### Requirements
 - Python 3 (3.12 recommended if you read `.flp` directly)
@@ -90,6 +91,7 @@ DAW（MIDI / FL Studio FLP）から書き出したプロジェクトを、ステ
 - **BPM 固定変換**（`--fixed-bpm N`）：MIDI のテンポマップを捨てて 4/4・単一 BPM で出力。全ノートを実時間（ms）に換算し、指定 BPM と `--resolution` の格子で最も近いマスに配置 — `--bgm` と再生タイミングが揃う
 - キー音の再利用・同一WAVの重複排除・無音除去・ピーク正規化・アンチスタック・2分テストカット
 - 変換ごとに `--summary-json` レポート
+- **GUI**（`daw2bms_gui.py` / `daw2bms-gui.exe`）：MIDI/FLP とステムフォルダを選び、トラックごとにモード（パーティション/ステムBGM/ノート別/除外）を設定。未マッピングのステムは自動的に追加BGM候補になり音抜けを防ぐ。マスター残差ベッドにも対応
 
 ### 必要環境
 - Python 3（`.flp` を直接読むなら 3.12 推奨）
@@ -141,6 +143,7 @@ DAW(MIDI / FL Studio FLP)에서 내보낸 프로젝트를, **스템에서 잘라
 - **BPM 고정 변환**(`--fixed-bpm N`): MIDI 템포 맵을 버리고 4/4·단일 BPM으로 출력. 모든 노트를 실제 시간(ms)으로 환산해 지정 BPM·`--resolution` 격자에서 가장 가까운 칸에 배치 — `--bgm`과 재생 타이밍 유지
 - 키음 재사용·동일 WAV 중복제거·무음 제거·피크 정규화·anti-stack·2분 테스트컷
 - 변환마다 `--summary-json` 리포트
+- **GUI**(`daw2bms_gui.py` / `daw2bms-gui.exe`): MIDI/FLP·스템 폴더 선택 → 트랙별 모드(파티션/스템BGM/노트별/제외) 지정 → 변환. 매핑 안 된 스템은 자동으로 추가 BGM 후보가 되어 빠지는 소리 방지, 마스터 잔차 베드 지원. exe 빌드: `pyinstaller --onefile --windowed --name daw2bms-gui --collect-all pyflp daw2bms_gui.py`
 
 ### 준비물
 - Python 3 (`.flp` 직접 읽기는 3.12 권장)

@@ -29,3 +29,7 @@ venv/
 # keep tool assets and the self-generated demo
 !silence.wav
 !examples/**
+
+# pyinstaller (GUI exe build)
+build/
+*.spec
