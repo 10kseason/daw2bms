@@ -6,9 +6,13 @@ master render, set per-track modes, convert.
 
 Per-track modes:
   파티션   -- waveform-preserving keysounds (--partition-keysound-tracks):
-              gapless onset tiling, slices sum back to the stem exactly
+              gapless onset tiling, slices sum back to the stem exactly.
+              Best default, but every slice is unique -- on dense songs it can
+              exhaust the 1296 #WAV namespace, so switch the densest tracks to
+              노트별 (pitch+duration reuse keeps their code count tiny and the
+              master residual bed absorbs the substitution error in the mix)
   스템 BGM -- whole stem placed as measure-aligned chunks (--bgm-stem-tracks)
-  노트별   -- classic per-note slices with declick fades
+  노트별   -- per-note slices reused by track+pitch+duration
   제외     -- track notes dropped (its stem can still play via 추가 BGM 스템)
 
 Stems not assigned to any track are offered as 추가 BGM 스템 (--extra-bgm-stems)
@@ -92,6 +96,7 @@ class App:
         self.max_seconds_var = tk.StringVar(value="0")
         self.residual_var = tk.BooleanVar(value=True)
         self.all_bgm_var = tk.BooleanVar(value=True)
+        self.merge_var = tk.BooleanVar(value=True)
 
         def file_row(row: int, label: str, var: tk.StringVar, command) -> None:
             ttk.Label(top, text=label).grid(row=row, column=0, sticky="w")
@@ -117,6 +122,9 @@ class App:
         ttk.Entry(meta, textvariable=self.max_seconds_var, width=7).pack(side="left", padx=4)
         ttk.Checkbutton(meta, text="모든 노트를 BGM으로 (원곡 재현)", variable=self.all_bgm_var).pack(
             side="left", padx=12
+        )
+        ttk.Checkbutton(meta, text="동시 노트는 화음 키음으로 병합", variable=self.merge_var).pack(
+            side="left", padx=4
         )
 
         tracks_frame = ttk.LabelFrame(root, text="트랙 (더블클릭: 모드 순환 / 스템 열 더블클릭: WAV 지정)")
@@ -408,7 +416,12 @@ class App:
 
         argv: list[str] = [str(input_path), "-o", str(output_path)]
         if self.all_bgm_var.get():
-            argv += ["--all-notes-to-bgm", "--background-layers", "32"]
+            argv += ["--all-notes-to-bgm", "--background-layers", "48"]
+        # 노트별 tracks reuse by pitch+duration so dense songs stay inside the
+        # 1296 #WAV namespace; partition tracks bypass reuse on their own
+        argv += ["--keysound-reuse", "track-pitch-duration"]
+        if self.merge_var.get():
+            argv += ["--merge-same-time-keysounds"]
         if max_seconds > 0:
             argv += ["--max-seconds", f"{max_seconds:g}"]
         argv += ["--tracks", ",".join(str(t) for t in sorted(included_tracks))]
